@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ESP32 256-bit SRAM PUF Dashboard</title>
+<style>
+:root{--bg:#f5f6f8;--card:#fff;--tx:#1a1d23;--mut:#6b7280;--ac:#0f766e;--b:#e2e5ea;--one:#0f766e;--zero:#e5e7eb;--bad:#dc2626}
+@media(prefers-color-scheme:dark){:root{--bg:#0f1216;--card:#181c22;--tx:#e8eaed;--mut:#9aa1ab;--ac:#2dd4bf;--b:#2a3039;--one:#2dd4bf;--zero:#2a3039;--bad:#f87171}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:14px system-ui,sans-serif;padding:16px}
+h1{font-size:20px;margin:0 0 12px}.sub{color:var(--mut);margin-bottom:12px}
+.tabs{display:flex;gap:6px;margin-bottom:14px;border-bottom:1px solid var(--b)}
+.tabs button{border:0;border-bottom:2px solid transparent;border-radius:0;background:none;padding:8px 14px}
+.tabs button.on{border-color:var(--ac);color:var(--ac);font-weight:600}
+.bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px}
+button{background:var(--card);color:var(--tx);border:1px solid var(--b);padding:8px 14px;border-radius:8px;cursor:pointer;font-size:14px}
+button.p{background:var(--ac);color:#fff;border-color:var(--ac)}button:disabled{opacity:.45;cursor:not-allowed}
+input[type=number],select{padding:7px;border-radius:8px;border:1px solid var(--b);background:var(--card);color:var(--tx)}
+input[type=number]{width:70px}
+input.tx{padding:7px;border-radius:8px;border:1px solid var(--b);background:var(--card);color:var(--tx);width:100%;max-width:420px}
+.st{color:var(--mut);margin-left:auto;display:flex;gap:14px;flex-wrap:wrap}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:#9ca3af;margin-right:6px}.dot.on{background:#22c55e}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:14px}
+.card{background:var(--card);border:1px solid var(--b);border-radius:12px;padding:12px}
+.k{color:var(--mut);font-size:12px}.v{font-size:22px;font-weight:600}
+.charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:10px;margin-bottom:14px}
+canvas{width:100%;height:170px;display:block}
+.tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:10px;margin-bottom:14px}
+.tile .h{display:flex;justify-content:space-between;color:var(--mut);font-size:12px}
+.hex{font:600 11px ui-monospace,monospace;margin:6px 0;word-break:break-all}
+.grid{display:grid;grid-template-columns:repeat(16,1fr);gap:1px;margin:6px 0}
+.grid i{aspect-ratio:1;border-radius:2px;background:var(--zero)}.grid i.o{background:var(--one)}
+.log{font:12px ui-monospace,monospace;height:150px;overflow:auto;white-space:pre-wrap;color:var(--mut)}
+.note{color:var(--mut);font-size:12px;margin-top:8px;line-height:1.5}
+.mono{font:12px ui-monospace,monospace;word-break:break-all}
+.ok{color:var(--ac);font-weight:600}.no{color:var(--bad);font-weight:600}
+.key{font:600 13px ui-monospace,monospace;word-break:break-all;margin-top:4px}
+.hide{display:none}
+.kv{display:grid;grid-template-columns:230px 1fr;gap:6px 14px;margin-top:8px;align-items:start}.kv .k{padding-top:1px}
+</style></head><body>
+<h1>ESP32 256-bit SRAM PUF Dashboard</h1>
+<div class="bar">
+ <button class="p" id="conn">1. Connect DevKit serial</button>
+ <button class="p" id="rconn">2. Connect relay</button>
+ <button id="wconn">3. Connect WROOM USB (optional; not needed if sending through the DevKit)</button>
+ <button id="ron" disabled>WROOM power ON</button><button id="roff" disabled>WROOM power OFF</button>
+ <label>channel <input type="number" id="rch" value="2" min="1" max="8"></label>
+ <label><input type="checkbox" id="inv"> invert (WROOM on NC contact)</label>
+ <button id="tcut" disabled>Test power cut</button>
+ <span class="st"><span><span class="dot" id="dS"></span><span id="tS">DevKit serial: not connected</span></span><span><span class="dot" id="dR"></span><span id="tR">Relay: not connected</span></span><span><span class="dot" id="dW"></span><span id="tW">WROOM: unknown</span></span><span><span class="dot" id="dE"></span><span id="tE">WROOM USB: not connected</span></span></span>
+</div>
+<div class="bar">
+ <button class="p" id="cold" disabled>⏻ Cold reboot now (manual)</button>
+ <label>off time <input type="number" id="off" value="10" min="0.5" step="0.5"> s</label>
+ <label>on time <input type="number" id="on" value="10" min="2" step="1"> s</label>
+ <label>cycles <input type="number" id="cyc" value="20" min="0"> (0 = until stopped)</label>
+ <button id="auto" disabled>▶ Auto cold-reboot</button>
+ <button id="stop" disabled>■ Stop</button>
+ <label><input type="checkbox" id="pas" checked> also capture boots caused by anything else (e.g. periodic_power.py)</label>
+ <button id="csv" disabled>Export CSV</button>
+ <button id="clr">Clear</button>
+ <span class="k" id="prog"></span>
+</div>
+<div class="note" style="margin:-4px 0 12px">Off time = how long the WROOM is unpowered. On time = how long it stays powered each auto cycle (the response is captured as soon as it arrives; the rest is hold time). Both are read at every cycle, so they can be changed while auto is running. The DevKit needs ~3 s of silence to report "WROOM is OFF", so use an off time of 3.5 s or more if you want that confirmed.</div>
+<div class="tabs"><button class="on" data-tab="t1">PUF readings</button><button data-tab="t2">Fuzzy extractor</button><button data-tab="t3">Wi-Fi &amp; cloud</button></div>
+
+<section id="t1">
+<div class="stats">
+ <div class="card"><div class="k">Sequences</div><div class="v" id="sN">0</div></div>
+ <div class="card"><div class="k">Uniformity (ideal 50%)</div><div class="v" id="sW">–</div></div>
+ <div class="card"><div class="k">Distinct responses</div><div class="v" id="sU">–</div></div>
+ <div class="card"><div class="k">Mean intra-HD (pairwise)</div><div class="v" id="sH">–</div></div>
+ <div class="card"><div class="k">Stable bits</div><div class="v" id="sS">–</div></div>
+</div>
+<div class="note" id="warn" style="margin:-4px 0 12px"></div>
+<div class="charts">
+ <div class="card"><div class="k">Hamming weight per cycle</div><canvas id="c1"></canvas></div>
+ <div class="card"><div class="k">Hamming distance vs first response</div><canvas id="c2"></canvas></div>
+ <div class="card"><div class="k">Stable bits vs cycles collected</div><canvas id="c3"></canvas></div>
+</div>
+<div class="card" style="margin-bottom:14px"><div class="k">Golden key (majority vote over all sequences)</div><div class="mono" id="gold">–</div>
+ <div class="k" style="margin-top:8px">Stable-bit mask (1 = bit never flipped)</div><div class="mono" id="mask">–</div></div>
+<div class="k" style="margin-bottom:6px">Sequences, one per cold reboot (newest first)</div>
+<div class="tiles" id="tiles"></div>
+</section>
+
+<section id="t2" class="hide">
+<div class="bar">
+ <label>Error correction <select id="eT"></select></label>
+ <label>Enrollment readings (majority vote, use odd) <input type="number" id="eN" value="5" min="1"></label>
+ <button class="p" id="enr">Enroll &amp; generate key</button>
+ <button id="rst">Reset enrollment</button>
+ <button id="dlh" disabled>Download helper data</button>
+ <button id="lh">Load helper data</button><input type="file" id="lhf" accept=".json,application/json" class="hide">
+ <button id="leh">Load helper data from ESP32</button>
+ <label><input type="checkbox" id="toEsp" checked> store in ESP32 when downloading (replaces the old copy)</label>
+</div>
+<div class="note" id="fMode" style="margin:-4px 0 10px"><b>Workflow:</b> enroll <u>once</u>, download the helper data. <b>Download helper data</b> also saves it in the ESP32's flash and replaces any copy already there (sent through the DevKit bridge, or through the WROOM's own USB with button 3). Later, <b>Load helper data from ESP32</b> reads it back. For every later session load the helper data instead of enrolling again; a new enrollment forms a new reference and therefore a different key.</div>
+<div class="stats">
+ <div class="card"><div class="k">Code</div><div class="v" id="fC" style="font-size:16px">–</div></div>
+ <div class="card"><div class="k">Reproductions</div><div class="v" id="fR">0</div></div>
+ <div class="card"><div class="k">Success rate</div><div class="v" id="fP">–</div></div>
+ <div class="card"><div class="k">Worst raw errors seen (of 256)</div><div class="v" id="fM">–</div></div>
+</div>
+<div class="card" style="margin-bottom:14px"><div class="k">① Stable sequence after fuzzy extractor (all 256 bits error-corrected, before key derivation)</div>
+ <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start;margin-top:6px">
+  <div class="grid" id="fG" style="width:260px;margin:0"></div>
+  <div style="flex:1;min-width:260px"><div class="k">Binary (256 bits)</div><div class="mono" id="fB">–</div>
+   <div class="k" style="margin-top:8px">Hex (256 bits, no padding)</div><div class="key" id="fX">–</div>
+   <div class="k" style="margin-top:8px" id="fE"></div></div></div></div>
+<div class="card" style="margin-bottom:14px"><div class="k">② Key derivation function: HKDF-SHA-256 (RFC 5869) applied to the recovered secret</div>
+ <div class="kv">
+  <span class="k">Input secret (IKM)</span><span class="mono" id="kI">–</span>
+  <span class="k">Salt (public, derived from info, so the key is repeatable)</span><span class="mono" id="kS">–</span>
+  <span class="k">Info (domain separation)</span><span class="mono" id="kN">–</span>
+  <span class="k">Extract: PRK = HMAC(salt, IKM)</span><span class="mono" id="kP">–</span>
+  <span class="k">Expand: T(1) = HMAC(PRK, info ‖ 0x01)</span><span class="mono" id="kO">–</span>
+  <span class="k">Cross-check vs WebCrypto HKDF</span><span class="mono" id="kV">–</span>
+  <span class="k">Key-check tag SHA-256("PUFFE-check" ‖ key)</span><span class="mono" id="kC">–</span>
+  <span class="k">Latest reproduction</span><span class="mono" id="kL">–</span>
+ </div>
+ <div class="k" style="margin-top:12px">③ Final 256-bit key (= T(1))</div><div class="key" id="fK">Not enrolled. Collect sequences, then click Enroll.</div>
+ <div class="k" style="margin-top:10px">Helper data P = response ⊕ codeword (public)</div><div class="mono" id="fH">–</div>
+ <div class="k" style="margin-top:10px">Self-test</div><div class="mono" id="fT">–</div>
+ <div class="note">Secret, PRK and key are shown for demonstration only; a real device would never display them.</div></div>
+<div class="charts"><div class="card"><div class="k">Raw bit errors per reproduction (dashed = correctable limit t)</div><canvas id="c4"></canvas></div></div>
+<div class="k" style="margin-bottom:6px">Key reproduction per sequence (newest first)</div>
+<div class="tiles" id="ftiles"></div>
+<div class="card"><div class="note" style="margin-top:0"><b>Construction.</b> Code-offset fuzzy extractor over one extended BCH code: BCH(255,k,t) plus an overall parity bit gives a (256,k) code, so every one of the 256 PUF bits is protected and nothing is padded. Enrollment: majority-vote the chosen readings into <i>w</i>; encode the k message bits of <i>w</i> to codeword <i>c</i>; publish <i>P = w ⊕ c</i> (only 256−k bits are non-zero); key = HKDF-SHA-256(<i>w</i>, salt, info). Nothing random is drawn, so every enrollment from the same device gives the same stable sequence and the same key (use enough readings that the majority vote is the same each time). Reproduction: XOR a new reading with <i>P</i>, BCH-decode (Berlekamp–Massey + Chien search), re-derive the key and verify it against the stored tag.<br><b>Why not pad?</b> Padding with fixed bits adds no PUF information and no protection, so it would only make the sequence look longer. Splitting into 4×BCH(63) leaves 4 bits over and fails whenever any one block has too many errors; one long code is more reliable and gives more secret bits.<br><b>Security limit.</b> The key has at most 256−(256−k) = k bits of entropy left after the helper data (less if PUF bits are biased). HKDF cannot add entropy.</div></div>
+</section>
+
+<section id="t3" class="hide">
+<div class="card" style="margin-bottom:14px"><div class="k">Settings kept in the WROOM's own flash (sent through the DevKit; nothing is hard-coded in the firmware)</div>
+ <div class="kv" style="margin-top:10px">
+  <span class="k">Mode</span><select id="cm"><option value="capture">capture: print the PUF response (for enrolment)</option><option value="run">run: rebuild the key, join Wi-Fi, authenticate with the cloud</option></select>
+  <span class="k">Wi-Fi name (2.4 GHz)</span><input type="text" class="tx" id="cs">
+  <span class="k">Wi-Fi password</span><input type="password" class="tx" id="cp" placeholder="leave empty to keep the stored one">
+  <span class="k">Cloud server address</span><input type="text" class="tx" id="cu" placeholder="http://192.168.1.10:5000 (the laptop's Wi-Fi IP, from ipconfig)">
+  <span class="k">Device ID</span><input type="text" class="tx" id="cd" value="esp32-001">
+  <span class="k">Cloud admin token</span><input type="password" class="tx" id="ct" placeholder="printed by server.py (used to register the device)">
+ </div>
+ <div class="bar" style="margin-top:10px"><button class="p" id="cgo">Register in cloud &amp; go online</button><button id="csend">Send settings only</button><button id="cread">Read settings from ESP32</button></div>
+ <div class="note"><b>Register in cloud &amp; go online</b> registers this device's key with the cloud (open this page from <b>http://localhost:5000/puf</b> so it can reach the cloud), and only after the cloud accepts it does it tell the WROOM that it is registered. Until then the WROOM keeps Wi-Fi OFF, even in run mode. If the cloud later deletes the device, the WROOM switches Wi-Fi off again. Empty fields are left as stored. Settings apply after the next power-up (WROOM power OFF, then ON). The Wi-Fi password is kept in the WROOM's flash and is never printed back. In run mode the WROOM no longer prints its PUF response, so switch the mode back to capture to enrol again.</div></div>
+</section>
+
+<div class="card"><div class="k">Log</div><div class="log" id="log"></div></div>
+<script>
+// Real binary BCH codec over GF(2^m); GF6 -> n=63, GF8 -> n=255
+function makeGF(m,poly){const n=(1<<m)-1,exp=new Array(2*n),log=new Array(n+1);let x=1;
+ for(let i=0;i<n;i++){exp[i]=exp[i+n]=x;log[x]=i;x<<=1;if(x>>m)x^=poly}
+ return{n,exp,log,mul:(a,b)=>a&&b?exp[log[a]+log[b]]:0,div:(a,b)=>a?exp[(log[a]-log[b]+n)%n]:0}}
+const GF6=makeGF(6,0x43),GF8=makeGF(8,0x11D);
+function BCH(t,GF=GF6){
+ const n=GF.n,gm=GF.mul;
+ const pmul=(a,b)=>{const r=new Array(a.length+b.length-1).fill(0);a.forEach((x,i)=>b.forEach((y,j)=>r[i+j]^=gm(x,y)));return r};
+ let g=[1];const seen=new Set();
+ for(let i=1;i<=2*t;i++){if(seen.has(i))continue;
+  let m=[1],j=i;do{seen.add(j);m=pmul(m,[GF.exp[j],1]);j=(j*2)%n}while(j!==i);g=pmul(g,m)}
+ const nk=g.length-1,k=n-nk;
+ return{n,k,t,g,
+  encode(msg){const d=new Array(n).fill(0);for(let i=0;i<k;i++)d[nk+i]=msg[i];
+   for(let i=n-1;i>=nk;i--)if(d[i])for(let j=0;j<=nk;j++)d[i-nk+j]^=g[j];
+   return d.slice(0,nk).concat(msg)},
+  extract(c){return c.slice(nk)},
+  decode(r){
+   const S=[];let any=0;
+   for(let j=1;j<=2*t;j++){let s=0;for(let i=0;i<n;i++)if(r[i])s^=GF.exp[(i*j)%n];S.push(s);if(s)any=1}
+   if(!any)return{cw:r.slice(),errors:0};
+   let C=[1],B=[1],L=0,m=1,b=1;
+   for(let q=0;q<2*t;q++){
+    let d=S[q];for(let i=1;i<=L;i++)d^=gm(C[i]||0,S[q-i]);
+    if(!d){m++;continue}
+    const T=C.slice(),f=GF.div(d,b);
+    while(C.length<B.length+m)C.push(0);
+    B.forEach((v,i)=>C[i+m]^=gm(f,v));
+    if(2*L<=q){L=q+1-L;B=T;b=d;m=1}else m++}
+   if(L>t)return null;
+   const cw=r.slice();let found=0;
+   for(let i=0;i<n;i++){let v=0;
+    for(let k2=0;k2<=L;k2++)if(C[k2])v^=gm(C[k2],GF.exp[((-i*k2)%n+n)%n]);
+    if(!v){cw[i]^=1;found++}}
+   return found===L?{cw,errors:L}:null}}}
+// Extended BCH(255,k) + overall parity bit = (256,k): uses all 256 PUF bits, no padding
+function ExtBCH(t){
+ const c=BCH(t,GF8),par=a=>a.reduce((x,y)=>x^y,0);
+ return{n:256,k:c.k,t,
+  encode(m){const w=c.encode(m);return w.concat([par(w)])},
+  extract(w){return c.extract(w.slice(0,255))},
+  decode(r){const d=c.decode(r.slice(0,255));if(!d)return null;
+   const p=par(d.cw),tot=d.errors+(p!==r[255]?1:0);
+   return tot>t?null:{cw:d.cw.concat([p]),errors:tot}}}}
+
+const N=256;
+const $=id=>document.getElementById(id),sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const css=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+let seqs=[],cur=null,armed=false,waiter=null,busy=false,stopFlag=false;
+let port=null,hid=null,serialOK=false,gen=0,reopening=false,wroom='unknown',lastRx=0,cycleOff=null,freshOn=false,offSeen=false;
+function log(t){const l=$('log');l.textContent+=t+'\n';if(l.textContent.length>40000)l.textContent=l.textContent.slice(-30000);l.scrollTop=l.scrollHeight}
+const sSt=(on,t)=>{$('dS').className='dot'+(on?' on':'');$('tS').textContent='DevKit serial: '+t;refresh()};
+const wSt=s=>{wroom=s;$('dW').className='dot'+(s==='on'?' on':'');$('tW').textContent='WROOM: '+(s==='on'?'powered, sending data':s==='off'?'off (no data)':'unknown')};
+const rSt=(on,t)=>{$('dR').className='dot'+(on?' on':'');$('tR').textContent='Relay: '+t;refresh()};
+function refresh(){const both=serialOK&&hid;$('cold').disabled=!both||busy;$('auto').disabled=!both||busy;$('stop').disabled=!busy;$('ron').disabled=$('roff').disabled=!hid;$('tcut').disabled=!both||busy}
+document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
+ document.querySelectorAll('.tabs button').forEach(x=>x.classList.toggle('on',x===b));
+ ['t1','t2','t3'].forEach(id=>$(id).classList.toggle('hide',id!==b.dataset.tab));draw();drawF()});
+
+/* ---------- Serial (survives power cuts) ---------- */
+$('conn').onclick=async()=>{
+ if(!('serial' in navigator)){alert('Web Serial not supported. Use Chrome/Edge on desktop.');return}
+ try{const p=await navigator.serial.requestPort();port=p;await openPort()}catch(e){log('Serial: '+e.message)}};
+async function openPort(){
+ await port.open({baudRate:115200});serialOK=true;const g=++gen;sSt(true,'connected @115200');readLoop(port,g)}
+async function readLoop(p,g){
+ const dec=new TextDecoder();let buf='';
+ while(p.readable&&g===gen){
+  const r=p.readable.getReader();
+  try{for(;;){const{value,done}=await r.read();if(done)break;buf+=dec.decode(value,{stream:true});
+   let i;while((i=buf.indexOf('\n'))>=0){line(buf.slice(0,i).replace(/\r/g,''));buf=buf.slice(i+1)}}}
+  catch(e){log('Serial read error: '+e.message)}
+  finally{try{r.releaseLock()}catch(_){}}}
+ if(g===gen){serialOK=false;sSt(false,'lost, waiting for it to return…')}}
+if(navigator.serial){
+ navigator.serial.addEventListener('disconnect',e=>{if(e.target===ep)eSt(false,'unplugged');if(e.target===port){serialOK=false;wSt('unknown');sSt(false,'unplugged, waiting…')}});
+ navigator.serial.addEventListener('connect',e=>{if(port&&!serialOK&&e.target!==ep){port=e.target;reopen()}})}
+async function reopen(){
+ if(reopening)return;reopening=true;
+ for(let i=0;i<40&&!serialOK;i++){
+  try{try{await port.close()}catch(_){}await openPort();log('Serial port reopened');break}catch(e){await sleep(300)}}
+ reopening=false}
+
+function line(raw){
+ const l=raw.replace(/^\s*\[\s*\d+(?:\.\d+)?s\]\s?/,'');      // strip the DevKit's "[12.3s] " prefix
+ if(!l.trim())return;
+ if(/^\[run\]/.test(l)){lastRx=Date.now();if(wroom!=='on')wSt('on');return}   // run-mode heartbeat, keeps the WROOM status alive
+ if(/^(HELPER_|CFG_|BRIDGE_|Helper data in ESP|PUF buffer @)/.test(l)){lastRx=Date.now();espLine(l);return}   // helper-data replies relayed by the DevKit
+ if(/WROOM is ON/.test(l)){lastRx=Date.now();freshOn=true;wSt('on');log(raw);return}
+ if(/WROOM is OFF/.test(l)){offSeen=true;wSt('off');log(raw);return}
+ if(/DevKit ready/.test(l)){log(raw);return}
+ lastRx=Date.now();if(wroom!=='on')wSt('on');
+ const hdr=/SRAM PUF Response/.test(l);
+ if(armed||!(hdr||cur))log(l);          // hide repeated blocks when not capturing
+ if(hdr){cur={};return}
+ if(!cur)return;let m;
+ if(m=l.match(/Reset Reason:\s*(\S+)/))cur.rr=m[1];
+ else if(m=l.match(/Status:\s*(\S+)/))cur.st=m[1];
+ else if(m=l.match(/Canary:\s*(\S+)/))cur.can=m[1];
+ else if(m=l.match(/Source:\s*(.+)/))cur.src=m[1].trim();
+ else if(m=l.match(/Binary \(\d+-bit\):\s*([01]+)/))cur.bin=m[1];
+ else if(m=l.match(/Hex \(\d+-bit\):\s*0x([0-9A-Fa-f]+)/))cur.hex='0x'+m[1].toUpperCase();
+ else if(m=l.match(/Hamming Weight:\s*(\d+)/)){cur.hw=+m[1];const b=cur;cur=null;onBlock(b)}}
+function onBlock(b){
+ const fresh=freshOn;freshOn=false;const viaArm=armed;
+ if(!viaArm&&!($('pas').checked&&fresh))return;     // only the first block after a power-up counts
+ if(!b.bin||b.bin.length!==N){log('⚠ incomplete block ignored');return}
+ if(b.rr&&!/^(POWERON|BROWNOUT)$/.test(b.rr)){log('⚠ not a cold boot (reset reason '+b.rr+'): noinit SRAM is retained on warm resets, ignored');return}
+ if(b.can==='RETAINED'){log('⚠ canary retained: the SRAM never lost power, so this is not a fresh PUF read. Ignored.');return}
+ if(b.st&&b.st!=='OK'){log('⚠ sketch reported status '+b.st+' (noinit buffer overwritten), ignored');return}
+ armed=false;b.t=new Date().toLocaleTimeString();b.n=seqs.length+1;b.off=viaArm?cycleOff:(offSeen?true:null);offSeen=false;
+ if(seqs.length&&seqs[seqs.length-1].bin===b.bin)log('ℹ identical to the previous cycle: a real power loss normally flips a few bits');
+ seqs.push(b);
+ log(`✓ cycle ${b.n}: HW ${b.hw}/256`);render();if(fe)feRun(b);
+ if(waiter){waiter(true);waiter=null}}
+
+/* ---------- Helper data kept in the ESP32's flash (NVS), via the WROOM's own USB port ---------- */
+let ep=null,epReader=null,epLoop=null,epGen=0,epResolve=null;
+const eSt=(on,t)=>{$('dE').className='dot'+(on?' on':'');$('tE').textContent='WROOM USB: '+t};
+const espDone=v=>{if(epResolve){const r=epResolve;epResolve=null;r(v)}};
+function espLine(l){
+ let m;
+ if(m=l.match(/^HELPER_OK\s+(\w+)/)){
+  log('✓ ESP32 helper data: '+({replaced:'REPLACED (an older copy was there)',stored:'stored (none existed before)',unchanged:'identical to the copy already stored, left unchanged',cleared:'erased'}[m[1]]||m[1]));espDone(true)}
+ else if(m=l.match(/^HELPER_ERR\s*(.*)/)){log('✗ ESP32/bridge: '+m[1]);espDone(false)}
+ else if(/^HELPER_NONE/.test(l)){log('ESP32 has no helper data stored');espDone(null)}
+ else if(m=l.match(/^HELPER_DATA\s+(\d+)\s+([01]{256})\s+([0-9a-fA-F]+)\s+([0-9a-fA-F]{64})\s+(\S+)/))
+  espDone({t:+m[1],helper_bits:m[2],salt:m[3],key_check:m[4],info:m[5]});
+ else if(/^CFG_OK/.test(l))espDone(true)
+ else if(m=l.match(/^CFG_ERR\s*(.*)/)){log('✗ ESP32 rejected the setting: '+m[1]);espDone(false)}
+ else if(m=l.match(/^CFG_DATA\s+mode=(\S+)\s+pass=(\S+)\s+helper=(\S+)\s+registered=(\S+)\s+device=(\S+)\s+server=(\S+)\s+ssid=(.*)$/))
+  espDone({mode:m[1],pass:m[2],helper:m[3],registered:m[4],device:m[5]==='-'?'':m[5],server:m[6]==='-'?'':m[6],ssid:m[7]});
+ else log('ESP32: '+l)}
+async function epOpen(){
+ await ep.open({baudRate:115200});const g=++epGen;eSt(true,'connected @115200');
+ epLoop=(async()=>{const dec=new TextDecoder();let buf='';
+  try{const r=ep.readable.getReader();epReader=r;
+   for(;;){const{value,done}=await r.read();if(done)break;buf+=dec.decode(value,{stream:true});
+    let i;while((i=buf.indexOf('\n'))>=0){const l=buf.slice(0,i).replace(/\r/g,'');buf=buf.slice(i+1);
+     if(/^(HELPER_|CFG_|BRIDGE_|Helper data in ESP|PUF buffer @)/.test(l))espLine(l)}   // PUF blocks on this port are ignored on purpose
+    if(buf.length>5000)buf=''}}
+  catch(e){}
+  finally{try{epReader&&epReader.releaseLock()}catch(_){}epReader=null;if(g===epGen)eSt(false,'closed')}})()}
+$('wconn').onclick=async()=>{
+ if(!('serial' in navigator)){alert('Web Serial not supported. Use Chrome/Edge on desktop.');return}
+ try{
+  if(ep&&$('wconn').dataset.on==='1'){                        // second click = disconnect
+   epGen++;try{await epReader.cancel()}catch(_){}try{await epLoop}catch(_){}try{await ep.close()}catch(_){}
+   ep=null;$('wconn').dataset.on='0';$('wconn').textContent='3. Connect WROOM USB (optional; not needed if sending through the DevKit)';eSt(false,'not connected');return}
+  ep=await navigator.serial.requestPort();await epOpen();
+  $('wconn').dataset.on='1';$('wconn').textContent='Disconnect WROOM USB';
+  log('WROOM USB connected. Note: this USB cable can power the WROOM, so unplug or disconnect it before cold-reboot captures.')}
+ catch(e){ep=null;log('WROOM USB: '+e.message+' (it must be a different port from the DevKit serial)')}};
+async function sendLine(text){
+ const viaUsb=ep&&$('wconn').dataset.on==='1'&&ep.writable;
+ const target=viaUsb?ep:(port&&serialOK&&port.writable?port:null);
+ if(!target)throw new Error('no way to reach the WROOM: connect the DevKit serial (bridge wired DevKit TX2 -> WROOM RX) or the WROOM USB (button 3)');
+ if(!viaUsb)log('Sending through the DevKit bridge (DevKit TX2 -> WROOM RX)…');
+ const w=target.writable.getWriter();
+ try{const d=new TextEncoder().encode(text+'\n');
+  for(let i=0;i<d.length;i+=64){await w.write(d.slice(i,i+64));await sleep(15)}}   // small chunks: never overruns the ESP32
+ finally{w.releaseLock()}}
+async function askEsp(text){
+ const p=new Promise(r=>epResolve=r);
+ try{await sendLine(text)}catch(e){epResolve=null;throw e}
+ const res=await Promise.race([p,sleep(4000).then(()=>'timeout')]);
+ if(res==='timeout'){epResolve=null;
+  log('✗ No answer from the ESP32 within 4 s. Is the WROOM powered (relay ON) and running puf_auth.ino? Through the DevKit this also needs the bridge firmware that forwards HELPER and CFG lines to the WROOM and the DevKit TX2 -> WROOM RX wire. (A fresh USB connection resets the board; wait a second and retry.)')}
+ return res}
+/* ---------- Wi-Fi & cloud settings stored in the ESP32 ---------- */
+async function pushCfg(items){
+ for(const[k,v]of items){
+  if(!v&&k!=='mode')continue;                                  // empty = keep what is stored
+  const res=await askEsp(`CFG ${k} ${v}`);
+  if(res!==true){log(`✗ Stopped at "${k}": ${res==='timeout'?'no answer from the ESP32':'rejected'}`);return false}
+  log(`✓ ESP32 setting ${k}: ${k==='pass'?'stored':v}`)}
+ return true}
+const cfgItems=()=>[['ssid',$('cs').value],['pass',$('cp').value],['server',$('cu').value.trim()],['device',$('cd').value.trim()],['mode',$('cm').value]];
+$('csend').onclick=async()=>{
+ try{if(await pushCfg(cfgItems()))log('Settings stored. They apply after the next power-up: click WROOM power OFF, then WROOM power ON.')}
+ catch(e){log('✗ '+e.message)}};
+$('cgo').onclick=async()=>{
+ try{
+  if(location.protocol==='file:'){log('✗ Open this dashboard from the cloud server, http://localhost:5000/puf, so it can register the device.');return}
+  if(!fe||!fe.key){log('✗ No key yet. Enrol first (Fuzzy extractor tab), or load the helper data and collect one cold-boot sequence so the key is reproduced.');return}
+  const dev=$('cd').value.trim();let adm=$('ct').value.trim();
+  if(!adm){try{adm=sessionStorage.getItem('adm')||''}catch(_){}}
+  if(!dev||!adm){log('✗ Enter the device ID and the cloud admin token.');return}
+  const body=JSON.stringify({device_id:dev,key:hex(fe.key),key_check:fe.check,info:fe.info});
+  const H={'Content-Type':'application/json','X-Admin-Token':adm};
+  let r=await fetch('/api/register',{method:'POST',headers:H,body});                                   // 1) register with the cloud
+  if(r.status===409&&confirm('"'+dev+'" is already registered in the cloud. Replace it with this key?'))r=await fetch('/api/register?replace=1',{method:'POST',headers:H,body});
+  const j=await r.json().catch(()=>({}));
+  if(r.status!==201){log('✗ The cloud did not accept the registration: '+(j.error||('HTTP '+r.status)));return}
+  try{sessionStorage.setItem('adm',adm)}catch(_){}
+  log('✓ Registered in the cloud: '+dev+(j.key_fp?' (key fingerprint '+j.key_fp+')':''));
+  if(!await pushCfg(cfgItems()))return;                                                                // 2) Wi-Fi, server, device, mode run
+  if(await askEsp('CFG registered 1')!==true){log('✗ Could not tell the ESP32 that it is registered');return}   // 3) only now Wi-Fi is allowed
+  log('✓ ESP32 marked as registered, Wi-Fi is now allowed. Click WROOM power OFF, wait about 4 seconds, then WROOM power ON.')}
+ catch(e){log('✗ '+e.message)}};
+$('cread').onclick=async()=>{
+ try{const r=await askEsp('CFG?');
+  if(r&&typeof r==='object'){$('cm').value=r.mode;$('cs').value=r.ssid;$('cu').value=r.server;if(r.device)$('cd').value=r.device;
+   log(`ESP32 settings: mode ${r.mode}, Wi-Fi "${r.ssid}", password ${r.pass}, registered ${r.registered}, server ${r.server||'-'}, device ${r.device||'-'}, helper data ${r.helper}`)}}
+ catch(e){log('✗ '+e.message)}};
+const helperJson=()=>({version:1,scheme:'code-offset fuzzy extractor',code:`extended BCH (256,${fe.code.k}), t=${fe.code.t}`,t:fe.code.t,k:fe.code.k,helper_bits:fe.P.join(''),salt:hex(fe.salt),info:fe.info,key_check:fe.check,kdf:'HKDF-SHA-256',enrolled_at:fe.at||new Date().toISOString()});
+
+/* ---------- Relay (WebHID, same commands as periodic_power.py) ---------- */
+$('rconn').onclick=async()=>{
+ if(!('hid' in navigator)){alert('WebHID not supported. Use Chrome/Edge on desktop.');return}
+ try{const ds=await navigator.hid.requestDevice({filters:[{vendorId:0x16C0,productId:0x05DF}]});
+  if(!ds.length)return;const d=ds[0];if(!d.opened)await d.open();hid=d;rSt(true,'connected');log('Relay opened')}
+ catch(e){log('Relay: '+e.message)}};
+async function relay(on){
+ if(!hid)throw new Error('Relay not connected');
+ const eff=$('inv').checked?!on:on,ch=Math.min(8,Math.max(1,+$('rch').value||2)),c=eff?0xFF:0xFD;
+ try{await hid.sendFeatureReport(0,new Uint8Array([c,ch,0,0,0,0,0,0]))}
+ catch(e){await hid.sendFeatureReport(0,new Uint8Array([0,c,ch,0,0,0,0,0,0]))}
+ log(`[WROOM power ${on?'ON':'OFF'}: relay ch${ch} ${eff?'energised':'released'} ${new Date().toLocaleTimeString()}]`)}
+async function waitState(s,ms){const t=Date.now();while(wroom!==s&&Date.now()-t<ms)await sleep(150);return wroom===s}
+$('tcut').onclick=async()=>{
+ if(busy)return;busy=true;refresh();
+ try{
+  log('Test 1/3: powering the WROOM, waiting for its data via the DevKit…');await relay(true);
+  if(!await waitState('on',12000)){log('✗ Test failed: no data from the WROOM. Check relay channel/invert, WROOM TX to DevKit GPIO16, common GND, and that puf_response_1.ino is flashed on the WROOM.');throw 0}
+  log('Test 2/3: WROOM is talking. Cutting power; the DevKit should report silence within ~3 s…');await relay(false);
+  if(!await waitState('off',10000)){log('✗ Test failed: data kept arriving after the cut, so the WROOM is still powered (wrong channel, wrong contact (try invert), or back-powered through the UART wires).');await relay(true);throw 0}
+  log('Test 3/3: silence seen. Restoring power…');await relay(true);
+  if(!await waitState('on',12000)){log('✗ Test failed: the WROOM did not come back.');throw 0}
+  log('✓ Test passed: the relay switches the WROOM and the DevKit sees it go silent and come back.')}
+ catch(e){if(e)log('✗ '+e.message)}
+ busy=false;refresh()};
+$('ron').onclick=()=>relay(true).catch(e=>log('Relay: '+e.message));
+$('roff').onclick=()=>relay(false).catch(e=>log('Relay: '+e.message));
+
+/* ---------- Cold reboot (manual + auto, adjustable timing) ---------- */
+let progBase='';
+const secs=id=>Math.max(0,+$(id).value||0);
+async function wait(ms,label){
+ const end=Date.now()+ms;
+ while(!stopFlag){const left=end-Date.now();if(left<=0)break;
+  $('prog').textContent=`${progBase}${label} ${(left/1000).toFixed(1)} s`;await sleep(Math.min(100,left))}}
+async function cold(hold){
+ const off=Math.max(500,secs('off')*1000);
+ offSeen=false;await relay(false);await wait(off,'power OFF');
+ if(stopFlag)return false;
+ const silent=Date.now()-lastRx>=2500;
+ cycleOff=(offSeen||silent)?true:(off<3000?null:false);
+ if(cycleOff===false)log('⚠ The DevKit still received WROOM data after the cut: the relay is not removing the WROOM\'s power (check channel/invert, and that the UART wires do not back-power it).');
+ cur=null;armed=true;const p=new Promise(r=>waiter=r);
+ const t0=Date.now();await relay(true);
+ const ok=await Promise.race([p,sleep(15000).then(()=>false)]);
+ if(!ok&&!stopFlag){armed=false;waiter=null;
+  log('✗ No PUF block within 15 s. Check WROOM power, WROOM TX to DevKit GPIO16, common GND, and that puf_response_1.ino is flashed on the WROOM.')}
+ if(ok&&hold){const rest=secs('on')*1000-(Date.now()-t0);if(rest>0)await wait(rest,'powered, next cut in')}
+ return ok}
+async function run(n,auto){
+ if(busy)return;busy=true;stopFlag=false;refresh();let fails=0;
+ try{for(let i=1;(n===0||i<=n)&&!stopFlag;i++){
+   progBase=(n?`Cycle ${i}/${n} · `:`Cycle ${i} · `);
+   const ok=await cold(auto&&!(n&&i===n));
+   fails=ok?0:fails+1;if(!stopFlag&&fails>=3){log('✗ Stopping: 3 cycles in a row without a response.');stopFlag=true}}}
+ catch(e){log('✗ '+e.message);stopFlag=true}
+ if(stopFlag&&hid){try{await relay(true)}catch(_){}}
+ busy=false;progBase='';$('prog').textContent=stopFlag?'Stopped':'Done';refresh()}
+$('cold').onclick=()=>run(1,false);
+$('auto').onclick=()=>run(Math.max(0,Math.floor(+$('cyc').value||0)),true);
+$('stop').onclick=()=>{stopFlag=true;armed=false;if(waiter){waiter(false);waiter=null}};
+
+/* ---------- Analysis & tiles ---------- */
+const hd=(a,b,n=N)=>{let d=0;for(let i=0;i<n;i++)if(a[i]!==b[i])d++;return d};
+const b2h=b=>{let o='';for(let i=0;i<b.length;i+=4)o+=parseInt(b.slice(i,i+4),2).toString(16);return '0x'+o.toUpperCase()};
+function stats(){const n=seqs.length,ones=Array.from({length:N},(_,i)=>seqs.reduce((a,s)=>a+(s.bin[i]==='1'),0));return{n,ones}}
+function render(){
+ $('csv').disabled=!seqs.length;const{n,ones}=stats();$('sN').textContent=n;
+ if(!n){$('warn').textContent='';['sW','sU','sH','sS','gold','mask'].forEach(i=>$(i).textContent='–');$('tiles').innerHTML='';draw();return}
+ $('sW').textContent=(seqs.reduce((a,s)=>a+s.hw,0)/n/N*100).toFixed(2)+'%';
+ const du=new Set(seqs.map(s=>s.bin)).size;$('sU').textContent=du;
+ const nd=seqs.filter(x=>x.off===false).length;
+ $('warn').innerHTML=(nd?'<span class="no">⚠ '+nd+' of '+n+' cycles: the DevKit still saw WROOM data after the power cut, so the relay did not remove its power.</span> ':'')+((n>=3&&du===1)?'<span class="no">⚠ All '+n+' responses are identical.</span> Real SRAM start-up always has a few noisy bits. Check that the WROOM really loses power (longer off time, leave DevKit GPIO17 unconnected so nothing back-feeds it).':'');
+ let tot=0,pc=0;for(let i=0;i<n;i++)for(let j=i+1;j<n;j++){tot+=hd(seqs[i].bin,seqs[j].bin);pc++}
+ $('sH').textContent=pc?(tot/pc).toFixed(1)+' bits':'–';
+ const st=ones.filter(o=>o===0||o===n).length;$('sS').textContent=n>1?`${st} / ${N}`:'–';
+ $('gold').textContent=b2h(ones.map(o=>o*2>=n?'1':'0').join(''));
+ $('mask').textContent=b2h(ones.map(o=>(o===0||o===n)?'1':'0').join(''));
+ const ref=seqs[0].bin;
+ $('tiles').innerHTML=seqs.slice().reverse().map(s=>
+  `<div class="card tile"><div class="h"><b>Cycle #${s.n}</b><span>${s.t}${s.rr?' · '+s.rr:''}${s.off===true?' · power-off confirmed':(s.off===false?' · NO silence seen':'')}</span></div>
+  <div class="hex">${s.hex||''}</div>
+  <div class="grid">${[...s.bin].map(b=>`<i class="${b==='1'?'o':''}"></i>`).join('')}</div>
+  <div class="h"><span>HW ${s.hw}/256</span><span>HD₀ ${hd(ref,s.bin)}</span></div></div>`).join('');
+ draw()}
+
+function setup(c){const r=c.getBoundingClientRect(),d=devicePixelRatio||1;c.width=r.width*d;c.height=r.height*d;
+ const g=c.getContext('2d');g.scale(d,d);g.clearRect(0,0,r.width,r.height);return[g,r.width,r.height]}
+const PAD={l:34,r:8,t:6,b:16};
+function fit(v,minSpan,cLo,cHi){            // integer axis range, 4 equal steps, centred on the data
+ const lo0=Math.min(...v),hi0=Math.max(...v),step=Math.max(1,Math.ceil(Math.max(minSpan,(hi0-lo0)*1.25)/4)),span=step*4;
+ const lo=Math.max(cLo,Math.min(Math.floor((lo0+hi0)/2-span/2),cHi-span));return{lo,hi:lo+span}}
+const up4=v=>Math.ceil(v/4)*4;
+function line2(c,ys,ymin,ymax,col,thr){
+ const[g,w,h]=setup(c);g.strokeStyle=css('--b');g.fillStyle=css('--mut');g.font='10px system-ui';g.lineWidth=1;
+ for(let i=0;i<=4;i++){const y=PAD.t+(h-PAD.t-PAD.b)*i/4;g.beginPath();g.moveTo(PAD.l,y);g.lineTo(w-PAD.r,y);g.stroke();
+  g.fillText(String(Math.round(ymin+(ymax-ymin)*(1-i/4))),2,y+3)}
+ const Y=v=>PAD.t+(1-(v-ymin)/(ymax-ymin))*(h-PAD.t-PAD.b);
+ if(thr!=null){g.strokeStyle=css('--bad');g.setLineDash([5,4]);g.beginPath();g.moveTo(PAD.l,Y(thr));g.lineTo(w-PAD.r,Y(thr));g.stroke();g.setLineDash([])}
+ g.fillStyle=css('--mut');g.fillText('cycle #',w/2-14,h-2);
+ if(!ys.length)return;
+ const X=i=>PAD.l+(ys.length<2?0.5:i/(ys.length-1))*(w-PAD.l-PAD.r);
+ g.fillText('1',PAD.l,h-2);g.fillText(String(ys.length),w-PAD.r-14,h-2);
+ g.strokeStyle=col;g.lineWidth=2;g.beginPath();ys.forEach((v,i)=>i?g.lineTo(X(i),Y(v)):g.moveTo(X(i),Y(v)));g.stroke();
+ g.fillStyle=col;if(ys.length<60)ys.forEach((v,i)=>{g.beginPath();g.arc(X(i),Y(v),2.5,0,7);g.fill()})}
+function stableCurve(){const n=seqs.length,fl=new Uint8Array(N),out=[];let cnt=N;
+ for(let k=0;k<n;k++){const b=seqs[k].bin;for(let i=0;i<N;i++)if(!fl[i]&&b[i]!==seqs[0].bin[i]){fl[i]=1;cnt--}out.push(cnt)}return out}
+function draw(){
+ if($('t1').classList.contains('hide'))return;
+ const hw=seqs.map(s=>s.hw),r1=hw.length?fit(hw,8,0,N):{lo:0,hi:N};line2($('c1'),hw,r1.lo,r1.hi,css('--ac'));
+ const d=seqs.map(s=>hd(seqs[0].bin,s.bin));line2($('c2'),d,0,up4(Math.max(8,Math.max(...d)*1.15)),'#f59e0b');
+ const st=stableCurve(),r3=st.length?fit(st,8,0,N):{lo:0,hi:N};line2($('c3'),st,r3.lo,r3.hi,'#6366f1')}
+addEventListener('resize',()=>{draw();drawF()});
+$('clr').onclick=()=>{seqs=[];cur=null;$('log').textContent='';render();if(fe){fe.runs=[];renderF()}};
+$('csv').onclick=()=>{const t='cycle,hex,binary,hamming_weight,reset_reason,time,power_off_confirmed\n'+seqs.map(s=>[s.n,s.hex,s.bin,s.hw,s.rr||'','"'+s.t+'"',s.off===true?'yes':(s.off===false?'no':'')].join(',')).join('\n');
+ const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([t],{type:'text/csv'}));a.download='puf_256.csv';a.click()};
+
+/* ---------- Fuzzy extractor: code-offset, extended BCH(255,k)+parity = (256,k) ---------- */
+let fe=null;
+const bitsToBytes=b=>{const o=new Uint8Array(Math.ceil(b.length/8));b.forEach((v,i)=>{if(v)o[i>>3]|=1<<(7-(i&7))});return o};
+const hex=u=>[...u].map(x=>x.toString(16).padStart(2,'0')).join('');
+const rbits=n=>[...crypto.getRandomValues(new Uint8Array(n))].map(x=>x&1);
+const enc=s=>new TextEncoder().encode(s);
+const sha=async u=>new Uint8Array(await crypto.subtle.digest('SHA-256',u));
+const hmac=async(k,m)=>{const key=await crypto.subtle.importKey('raw',k,{name:'HMAC',hash:'SHA-256'},false,['sign']);return new Uint8Array(await crypto.subtle.sign('HMAC',key,m))};
+async function kdf(secret,salt,infoStr){
+ const ikm=bitsToBytes(secret),info=enc(infoStr);
+ const prk=await hmac(salt,ikm),okm=await hmac(prk,new Uint8Array([...info,1]));
+ const nk=await crypto.subtle.importKey('raw',ikm,'HKDF',false,['deriveBits']);
+ const nat=new Uint8Array(await crypto.subtle.deriveBits({name:'HKDF',hash:'SHA-256',salt,info},nk,256));
+ return{ikm,prk,okm,match:hex(nat)===hex(okm)}}
+const tag=async key=>hex(await sha(new Uint8Array([...enc('PUFFE-check'),...key])));
+const bitsOf=s=>[...s.bin].map(Number);
+[10,15,18,20,25].forEach(t=>{const c=ExtBCH(t),o=document.createElement('option');o.value=t;o.textContent=`BCH(255,${c.k})+parity = (256,${c.k}): corrects ${t}, ${c.k}-bit secret`;if(t===18)o.selected=true;$('eT').appendChild(o)});
+function selfTest(){const out=[],T=40;
+ for(const t of [10,15,18,20,25]){const c=ExtBCH(t);let g=0;
+  for(let q=0;q<T;q++){const m=rbits(c.k),r=c.encode(m),e=new Set();while(e.size<t)e.add(Math.floor(Math.random()*256));e.forEach(i=>r[i]^=1);
+   const d=c.decode(r);if(d&&c.extract(d.cw).join()===m.join())g++}
+  out.push(`t=${t}: ${g}/${T}`)}
+ $('fT').textContent='Decode with exactly t random errors over all 256 bits → '+out.join(' · ')}
+selfTest();
+
+$('enr').onclick=async()=>{
+ if(fe&&!confirm('A device is already enrolled. Enrolling again builds a NEW reference and a DIFFERENT key (the old helper data stops matching the new key). To reuse the existing enrollment, use "Load helper data" instead. Enroll anyway?'))return;
+ const n=Math.max(1,+$('eN').value);
+ if(seqs.length<n){alert(`Need at least ${n} cold-boot sequence(s) first (have ${seqs.length}).`);return}
+ const code=ExtBCH(+$('eT').value),use=seqs.slice(0,n);
+ const w=Array.from({length:N},(_,i)=>use.filter(s=>s.bin[i]==='1').length*2>=n?1:0);
+ const cw=code.encode(code.extract(w)),P=w.map((v,i)=>v^cw[i]);   // codeword derived from w itself: deterministic, helper reveals only 256-k bits
+ const info=`SRAM-PUF-FE-v4|BCH(256,${code.k},t=${code.t})`,salt=(await sha(enc(info))).slice(0,16);
+ const kd=await kdf(w,salt,info);
+ fe={code,w,P,salt,info,kd,key:kd.okm,check:await tag(kd.okm),runs:[],at:new Date().toISOString()};$('dlh').disabled=false;
+ for(const s of seqs)await feRun(s);renderF()};
+$('rst').onclick=()=>{fe=null;$('dlh').disabled=true;renderF()};
+$('dlh').onclick=()=>{if(!fe)return;
+ const j=helperJson();
+ const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify(j,null,2)],{type:'application/json'}));a.download='helper_data.json';a.click();
+ if($('toEsp').checked)askEsp(`HELPER ${j.t} ${j.helper_bits} ${j.salt} ${j.key_check} ${j.info}`).catch(e=>log('✗ Not stored in the ESP32: '+e.message))};
+
+$('lh').onclick=()=>$('lhf').click();
+async function applyHelper(j,src){
+ const t=+j.t||+(/t=(\d+)/.exec(j.code||'')||[])[1];
+ if(!t||!/^[01]{256}$/.test(j.helper_bits||'')||!j.salt||!j.info||!j.key_check)throw new Error('missing fields (need t, helper_bits, salt, info, key_check)');
+ const code=ExtBCH(t);
+ fe={code,w:null,P:[...j.helper_bits].map(Number),salt:Uint8Array.from(j.salt.match(/../g).map(h=>parseInt(h,16))),info:j.info,kd:null,key:null,check:j.key_check,runs:[],loaded:true,at:j.enrolled_at};
+ $('dlh').disabled=false;log(`Helper data loaded from ${src} (t=${t}). Reproducing the key from the collected sequences…`);
+ for(const s of seqs)await feRun(s);renderF()}
+$('lhf').onchange=async e=>{
+ const f=e.target.files[0];e.target.value='';if(!f)return;
+ try{await applyHelper(JSON.parse(await f.text()),'file')}
+ catch(err){log('✗ Could not load helper data: '+err.message)}};
+$('leh').onclick=async()=>{
+ try{const res=await askEsp('HELPER?');
+  if(res&&res!=='timeout')await applyHelper(res,'the ESP32')}
+ catch(err){log('✗ Could not load helper data from the ESP32: '+err.message)}};
+
+async function feRun(s){
+ const f=fe;if(!f)return;
+ const w2=bitsOf(s),d=f.code.decode(w2.map((v,i)=>v^f.P[i]));
+ let ok=false,fp='–',fixed=null;
+ if(d){const fx=d.cw.map((v,i)=>v^f.P[i]);const kd=await kdf(fx,f.salt,f.info);fp=hex(kd.okm).slice(0,12);
+  ok=(await tag(kd.okm))===f.check;if(ok){fixed=fx;if(!f.key){f.w=fx;f.kd=kd;f.key=kd.okm}}}
+ f.runs.push({n:s.n,t:s.t,raw:f.w?hd(f.w,w2,N):(d?d.errors:null),ok,fp,fixed,nc:d?d.errors:null});if(f===fe)renderF()}
+
+function renderF(){
+ const f=fe;
+ if(!f){['fC','fP','fM'].forEach(i=>$(i).textContent='–');$('fR').textContent='0';
+  $('fK').textContent='Not enrolled. Collect sequences, then click Enroll.';
+  ['fH','kI','kS','kN','kP','kO','kV','kC','kL','fB','fX'].forEach(i=>$(i).textContent='–');
+  $('fG').innerHTML='';$('fE').textContent='';$('ftiles').innerHTML='';drawF();return}
+ const r=f.runs,good=r.filter(x=>x.ok).length,k=f.code.k;
+ const raws=r.map(x=>x.raw).filter(v=>v!=null);
+ $('fC').textContent=`(256,${k}) t=${f.code.t}`;$('fR').textContent=r.length;
+ $('fP').textContent=r.length?(100*good/r.length).toFixed(0)+'%':'–';
+ $('fM').textContent=raws.length?Math.max(...raws):'–';
+ if(!f.key){['kI','kP','kO','kV','fB','fX'].forEach(i=>$(i).textContent='–');$('kS').textContent=hex(f.salt);$('kN').textContent=f.info;$('kC').textContent=f.check;
+  $('fK').textContent='Helper data loaded. Waiting for a sequence that reproduces the key (collect cold-boot sequences)…';
+  $('fH').textContent=hex(bitsToBytes(f.P))+`  (reveals ${256-k} of 256 bits)`;$('kL').textContent=r.length?'✗ no successful reproduction yet':'–';
+  $('fG').innerHTML='';$('fE').textContent='';
+  $('ftiles').innerHTML=r.slice().reverse().map(x=>`<div class="card tile"><div class="h"><b>#${x.n}</b><span>${x.t}</span></div><div class="no" style="margin:6px 0">✗ Failed (too many errors)</div></div>`).join('');drawF();return}
+ $('fK').textContent=hex(f.key);
+ $('fH').textContent=hex(bitsToBytes(f.P))+`  (reveals ${256-k} of 256 bits)`;
+ $('kI').textContent=hex(f.kd.ikm)+'  (the full 256-bit stable sequence)';$('kS').textContent=hex(f.salt);$('kN').textContent=f.info;
+ $('kP').textContent=hex(f.kd.prk);$('kO').textContent=hex(f.kd.okm);
+ $('kV').textContent=f.kd.match?'✓ identical to crypto.subtle HKDF output':'✗ mismatch';
+ $('kC').textContent=f.check;
+ const last=r.slice().reverse().find(x=>x.ok&&x.fixed);
+ $('kL').textContent=last?`✓ cycle #${last.n} re-derived the identical key (${last.fp}…)`:(r.length?'✗ no successful reproduction yet':'–');
+ if(last){const b=last.fixed,same=b.join('')===f.w.join('');
+  $('fG').innerHTML=b.map(v=>`<i class="${v?'o':''}"></i>`).join('');
+  $('fB').textContent=b.join('');$('fX').textContent='0x'+hex(bitsToBytes(b)).toUpperCase();
+  $('fE').textContent=`Reconstructed from cycle #${last.n}: ${last.nc} bit error(s) corrected. ${same?'Identical to the enrolled reference ✓':'Differs from reference ✗'}`}
+ else{$('fG').innerHTML='';$('fB').textContent='No successful reconstruction yet.';$('fX').textContent='–';$('fE').textContent=''}
+ $('ftiles').innerHTML=r.slice().reverse().map(x=>
+  `<div class="card tile"><div class="h"><b>#${x.n}</b><span>${x.t}</span></div>
+  <div class="${x.ok?'ok':'no'}" style="margin:6px 0">${x.ok?'✓ Key reproduced':'✗ Failed (too many errors)'}</div>
+  <div class="h"><span>Raw errors ${x.raw}/256</span><span>fixed ${x.nc??'–'}</span></div><div class="mono" style="margin-top:4px">key ${x.fp}</div></div>`).join('');
+ drawF()}
+function drawF(){
+ if($('t2').classList.contains('hide'))return;
+ const r=(fe?.runs||[]).filter(x=>x.raw!=null);line2($('c4'),r.map(x=>x.raw),0,up4(Math.max(fe?fe.code.t+4:8,...r.map(x=>x.raw))),css('--ac'),fe?fe.code.t:null)}
+refresh();renderF();draw();
+</script></body></html>

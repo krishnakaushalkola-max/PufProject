@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Device telemetry</title>
+<style>
+:root{--bg:#f5f6f8;--card:#fff;--tx:#1a1d23;--mut:#6b7280;--ac:#0f766e;--b:#e2e5ea;--bad:#dc2626;--warn:#d97706}
+@media(prefers-color-scheme:dark){:root{--bg:#0f1216;--card:#181c22;--tx:#e8eaed;--mut:#9aa1ab;--ac:#2dd4bf;--b:#2a3039;--bad:#f87171;--warn:#fbbf24}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:14px system-ui,sans-serif;padding:16px}
+a{color:var(--ac)}h1{font-size:20px;margin:6px 0 4px}.sub{color:var(--mut);margin-bottom:12px}
+.bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px}
+button{background:var(--card);color:var(--tx);border:1px solid var(--b);padding:8px 14px;border-radius:8px;cursor:pointer;font-size:14px}
+button.p{background:var(--ac);color:#fff;border-color:var(--ac)}
+input[type=password]{padding:7px;border-radius:8px;border:1px solid var(--b);background:var(--card);color:var(--tx)}
+.card{background:var(--card);border:1px solid var(--b);border-radius:12px;padding:12px}
+.k{color:var(--mut);font-size:12px}.v{font-size:22px;font-weight:600;word-break:break-all}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-bottom:14px}
+.charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:10px;margin-bottom:14px}
+canvas{width:100%;height:150px;display:block}
+.pill{font-size:11px;padding:2px 8px;border-radius:99px;border:1px solid var(--ac);color:var(--ac);margin-left:6px;vertical-align:middle}
+.pill.off{border-color:var(--mut);color:var(--mut)}.pill.lock{border-color:var(--bad);color:var(--bad)}
+.mono{font:12px ui-monospace,monospace;word-break:break-all}
+.ok{color:var(--ac);font-weight:600}.no{color:var(--bad);font-weight:600}.wa{color:var(--warn);font-weight:600}
+.kv{display:grid;grid-template-columns:200px 1fr;gap:6px 14px;margin-top:8px;align-items:start}
+table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--b)}th{color:var(--mut);font-weight:500;font-size:12px}
+.scroll{overflow-x:auto}.note{color:var(--mut);font-size:12px;margin-top:8px;line-height:1.5}.hide{display:none}
+@media(max-width:600px){.kv{grid-template-columns:1fr}}
+</style></head><body>
+<div class="bar"><a href="/">← All devices</a></div>
+<h1><span id="title">Device</span><span id="pills"></span></h1>
+<div class="sub">Telemetry shown here was accepted by the cloud only after this device passed the nonce challenge (HMAC-SHA-256 with its PUF-derived key).</div>
+
+<div class="card hide" id="login" style="margin-bottom:14px">
+ <div class="k" id="loginMsg">Enter the admin token (printed by server.py).</div>
+ <div class="bar" style="margin-top:8px"><input type="password" id="adm" placeholder="admin token"><button class="p" id="go">Open</button></div>
+</div>
+
+<div id="main" class="hide">
+ <div class="card" style="margin-bottom:14px"><div class="k">Authentication</div>
+  <div class="kv">
+   <span class="k">Telemetry status</span><span id="fresh">–</span>
+   <span class="k">Last accepted handshake</span><span class="mono" id="hs">–</span>
+   <span class="k">Nonce (first 12 hex) and answer time</span><span class="mono" id="nn">–</span>
+   <span class="k">Device address</span><span class="mono" id="ip">–</span>
+   <span class="k">Active sessions</span><span class="mono" id="ses">–</span>
+   <span class="k">Key fingerprint</span><span class="mono" id="fp">–</span>
+   <span class="k">Construction</span><span class="mono" id="cons">–</span>
+  </div></div>
+ <div class="k" style="margin-bottom:6px">Latest reading</div>
+ <div class="grid" id="latest"></div>
+ <div class="charts" id="charts"></div>
+ <div class="card" style="margin-bottom:14px"><div class="k" style="margin-bottom:6px">Recent readings (newest first)</div><div class="scroll"><table id="tbl"></table></div></div>
+ <div class="card"><div class="k">REST API for this device</div>
+  <div class="mono" id="rest" style="margin-top:6px"></div>
+  <div class="note">The device sends readings with POST /api/telemetry and the Bearer token it received after answering the nonce challenge. Without that token the cloud stores nothing.</div></div>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const id=decodeURIComponent(location.pathname.split('/').filter(Boolean).pop()||'');
+let tok='';try{tok=sessionStorage.getItem('adm')||''}catch(_){}
+$('title').textContent=id;document.title=id+' · telemetry';
+const nowS=()=>Date.now()/1000;
+const tm=t=>t?new Date(t*1000).toLocaleString():'–';
+function ago(t){if(!t)return'never';const s=Math.max(0,Math.round(nowS()-t));return s<90?s+' s ago':s<5400?Math.round(s/60)+' min ago':Math.round(s/3600)+' h ago'}
+const UNITS={temperature_c:' °C',rssi:' dBm',free_heap:' B',uptime_s:' s',token_age_s:' s'};
+function fmt(k,v){
+ if(typeof v!=='number')return String(v);
+ if(k==='uptime_s'||k==='token_age_s'){const h=Math.floor(v/3600),m=Math.floor(v%3600/60),s=Math.floor(v%60);return(h?h+'h ':'')+(h||m?m+'m ':'')+s+'s'}
+ return v.toLocaleString(undefined,{maximumFractionDigits:2})+(UNITS[k]||'')}
+function showLogin(msg){$('main').classList.add('hide');$('login').classList.remove('hide');$('loginMsg').textContent=msg}
+$('go').onclick=()=>{tok=$('adm').value.trim();try{sessionStorage.setItem('adm',tok)}catch(_){}load()};
+$('adm').onkeydown=e=>{if(e.key==='Enter')$('go').click()};
+
+let chartKeys='',series=[];
+function drawChart(cv,key){
+ const dpr=window.devicePixelRatio||1,w=cv.clientWidth,h=cv.clientHeight;cv.width=w*dpr;cv.height=h*dpr;
+ const g=cv.getContext('2d');g.scale(dpr,dpr);g.clearRect(0,0,w,h);
+ const css=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+ const pts=series.filter(p=>typeof p.data[key]==='number').map(p=>[p.ts,p.data[key]]);
+ if(pts.length<2){g.fillStyle=css('--mut');g.fillText('collecting…',8,16);return}
+ let lo=Math.min(...pts.map(p=>p[1])),hi=Math.max(...pts.map(p=>p[1]));if(lo===hi){lo-=1;hi+=1}
+ const t0=pts[0][0],t1=pts[pts.length-1][0],L=48,R=8,T=8,B=18,X=t=>L+(t-t0)/Math.max(1e-9,t1-t0)*(w-L-R),Y=v=>T+(1-(v-lo)/(hi-lo))*(h-T-B);
+ g.strokeStyle=css('--b');g.beginPath();g.moveTo(L,T);g.lineTo(L,h-B);g.lineTo(w-R,h-B);g.stroke();
+ g.fillStyle=css('--mut');g.font='11px system-ui';g.textAlign='right';g.fillText(fmt('',hi),L-4,T+8);g.fillText(fmt('',lo),L-4,h-B);
+ g.textAlign='left';g.fillText(new Date(t0*1000).toLocaleTimeString(),L,h-4);g.textAlign='right';g.fillText(new Date(t1*1000).toLocaleTimeString(),w-R,h-4);
+ g.strokeStyle=css('--ac');g.lineWidth=2;g.beginPath();pts.forEach((p,i)=>i?g.lineTo(X(p[0]),Y(p[1])):g.moveTo(X(p[0]),Y(p[1])));g.stroke()}
+function render(j){
+ const d=j.device,last=j.telemetry[j.telemetry.length-1];series=j.telemetry;
+ $('pills').innerHTML=`<span class="pill ${d.online?'':'off'}">${d.online?'Online':'Offline'}</span>`+(d.blocked?'<span class="pill lock">Blocked</span>':'');
+ const age=last?nowS()-last.ts:null;
+ $('fresh').innerHTML=!last?'<span class="wa">No telemetry received yet</span>':age>30?`<span class="wa">Last reading ${ago(last.ts)}: device offline, or its session has not been re-authenticated</span>`:`<span class="ok">Live: last reading ${ago(last.ts)}</span>`;
+ const h=j.last_handshake;
+ $('hs').textContent=h?`${tm(h.responded)} (${ago(h.responded)})`:'no accepted handshake yet';
+ $('nn').textContent=h?`${(h.nonce||'').slice(0,12)}… answered in ${(h.responded-h.issued).toFixed(2)} s`:'–';
+ $('ip').textContent=(d.last_ip||'–')+' · last poll '+ago(d.last_seen);
+ $('ses').textContent=j.sessions+' (a session token is valid for 15 min, then the device runs a new nonce challenge)';
+ $('fp').textContent=(d.key_fp||'–')+'…';$('cons').textContent=d.info||'–';
+ $('latest').innerHTML=last?Object.entries(last.data).map(([k,v])=>`<div class="card"><div class="k">${esc(k)}</div><div class="v">${esc(fmt(k,v))}</div></div>`).join(''):'<div class="note">Waiting for the first authenticated reading…</div>';
+ // charts: numeric fields that actually change
+ const keys=last?Object.keys(last.data).filter(k=>typeof last.data[k]==='number'&&new Set(series.map(p=>p.data[k])).size>1).slice(0,4):[];
+ const sig=keys.join(',');
+ if(sig!==chartKeys){chartKeys=sig;$('charts').innerHTML=keys.map(k=>`<div class="card"><div class="k">${esc(k)} over time</div><canvas data-k="${esc(k)}"></canvas></div>`).join('')}
+ document.querySelectorAll('#charts canvas').forEach(cv=>drawChart(cv,cv.dataset.k));
+ // table
+ const cols=last?Object.keys(last.data):[];
+ $('tbl').innerHTML='<tr><th>Time</th>'+cols.map(c=>`<th>${esc(c)}</th>`).join('')+'</tr>'+
+  series.slice(-15).reverse().map(p=>`<tr><td>${new Date(p.ts*1000).toLocaleTimeString()}</td>`+cols.map(c=>`<td>${p.data[c]===undefined?'':esc(fmt(c,p.data[c]))}</td>`).join('')+'</tr>').join('');
+ $('rest').innerHTML=`GET ${esc(location.origin)}/api/devices/${esc(encodeURIComponent(id))}/telemetry &nbsp; (header X-Admin-Token)<br>POST ${esc(location.origin)}/api/telemetry &nbsp; (header Authorization: Bearer &lt;token&gt;)`}
+async function load(){
+ if(!tok){showLogin('Enter the admin token (printed by server.py).');return}
+ try{
+  const r=await fetch('/api/devices/'+encodeURIComponent(id)+'/telemetry?limit=120',{headers:{'X-Admin-Token':tok}});
+  if(r.status===403){showLogin('That admin token was not accepted.');return}
+  if(r.status===404){showLogin('Unknown device "'+id+'". Register it on the dashboard first.');return}
+  const j=await r.json();$('login').classList.add('hide');$('main').classList.remove('hide');render(j)}
+ catch(e){$('fresh').textContent='Cannot reach the server: '+e.message}}
+load();setInterval(()=>{if(tok&&!document.hidden)load()},2000);
+</script></body></html>
